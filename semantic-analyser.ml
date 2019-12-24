@@ -96,8 +96,26 @@ let rec lexical_addresses env params expr =
                                                then LambdaOpt'(new_params, opt_param, (lexical_addresses env new_all_params body))
                                                else LambdaOpt'(new_params, opt_param, (lexical_addresses (List.append [params] env) new_all_params body)))
   | Applic(operator, args) -> Applic'((lexical_addresses env params operator), (List.map (lexical_addresses env params) args))
-  | _ -> raise X_syntax_error
 
+
+let rec tail_calls in_tp expr = 
+  match expr with
+  | Const'(exp) -> Const'(exp)
+  | Var'(var) -> Var'(var)
+  | If'(test, dit, dif) -> If'((tail_calls false test), (tail_calls true dit), (tail_calls true dif))
+  | Seq'(exprs) -> (let rev_list = List.rev exprs in
+                    let last = List.hd rev_list in
+                    let rest = List.rev (List.tl rev_list) in
+                    Seq'(List.append (List.map (tail_calls false) rest) [tail_calls true last]))
+  | LambdaSimple'(params, body) -> LambdaSimple'(params, (tail_calls true body))
+  | LambdaOpt'(params, opt_param, body) -> LambdaOpt'(params, opt_param, (tail_calls true body))
+  | Applic'(operator, args) -> (if in_tp
+                                then ApplicTP'((tail_calls false operator), (List.map (tail_calls false) args))
+                                else Applic'((tail_calls false operator), (List.map (tail_calls false) args)))
+
+let lex e = tail_calls false (lexical_addresses [] [] (tag_parser e))
+
+let lex2 e = lexical_addresses [] [] (tag_parser e)
 
 
 module type SEMANTICS = sig
