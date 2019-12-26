@@ -102,21 +102,149 @@ let rec tail_calls in_tp expr =
   match expr with
   | Const'(exp) -> Const'(exp)
   | Var'(var) -> Var'(var)
-  | If'(test, dit, dif) -> If'((tail_calls false test), (tail_calls true dit), (tail_calls true dif))
+  | Box'(var) -> Box'(var)
+  | BoxGet'(var) -> BoxGet'(var)
+  | BoxSet'(var, expr) -> BoxSet'(var, (tail_calls in_tp expr))
+  | If'(test, dit, dif) -> If'((tail_calls false test), (tail_calls in_tp dit), (tail_calls in_tp  dif))
   | Seq'(exprs) -> (let rev_list = List.rev exprs in
                     let last = List.hd rev_list in
                     let rest = List.rev (List.tl rev_list) in
                     Seq'(List.append (List.map (tail_calls false) rest) [tail_calls true last]))
+  | Set'(set_var, set_value) -> Set'((tail_calls false set_var), (tail_calls false set_value))
+  | Def'(def_name, def_value) -> Def'((tail_calls false def_name), (tail_calls false def_value))
+  | Or'(exprs) -> (let rev_list = List.rev exprs in
+                   let last = List.hd rev_list in
+                   let rest = List.rev (List.tl rev_list) in
+                   Or'(List.append (List.map (tail_calls false) rest) [tail_calls true last]))
   | LambdaSimple'(params, body) -> LambdaSimple'(params, (tail_calls true body))
   | LambdaOpt'(params, opt_param, body) -> LambdaOpt'(params, opt_param, (tail_calls true body))
   | Applic'(operator, args) -> (if in_tp
                                 then ApplicTP'((tail_calls false operator), (List.map (tail_calls false) args))
                                 else Applic'((tail_calls false operator), (List.map (tail_calls false) args)))
+  | ApplicTP'(operator, args) -> ApplicTP'((tail_calls false operator), (List.map (tail_calls false) args))
+
+
+
+let check = fun a b -> a || b
+
+let is_boxing read_list write_list = 
+  let check_writes num = 
+    let remaining = List.filter (fun number -> number != num) write_list in
+    ((List.length remaining) > 0) in
+  let lst = List.map (check_writes) read_list in
+  List.fold_right check lst false;;
+
+
+let rec boxing expr =   
+  match expr with
+  | Const'(exp) -> Const'(exp)
+  | Var'(var) -> Var'(var)
+  | Box'(var) -> Box'(var)
+  | BoxGet'(var) -> BoxGet'(var)
+  | BoxSet'(var, exp) -> BoxSet'(var, (boxing exp))
+  | If'(test, dit, dif) -> If'((boxing test), (boxing dit), (boxing dif))
+  | Seq'(exps) -> Seq'(List.map boxing exps)
+  | Set'(set_var, set_val) -> Set'((boxing set_var), (boxing set_val))
+  | Def'(def_var, def_val) -> Def'((boxing def_var), (boxing def_val))
+  | Or'(exps) -> Or'(List.map boxing exps)
+  | LambdaSimple'(params, body) -> LambdaSimple'(params, (boxing (handle_lambda params body)))
+  | LambdaOpt'(params, opt_param, body) -> LambdaOpt'(params, opt_param, (boxing (handle_lambda (List.append params [opt_param]) body)))
+  | Applic'(operator, args) -> Applic'((boxing operator), (List.map boxing args))
+  | ApplicTP'(operator, args) -> ApplicTP'((boxing operator), (List.map boxing args));
+
+
+
+(*and handle_lambda params body =
+ match exprs with
+  | Seq'(exps) -> (let dont_care = (for i = 0 to ((List.length params) - 1) do
+                        (check_box_var (List.nth params i) exps)
+                        done) in
+                    Seq'(exps))
+  | _ -> boxing exprs;*)
+
+and handle_lambda params body = 
+  match params with
+  | param :: rest -> handle_lambda rest (check_box_var param body)
+  | [] -> body;
+
+
+
+
+and check_box_var param body =
+  let global_reads = ref [] in
+  let global_writes = ref [] in
+  let add_to_reads branch_num = 
+    (if (not (List.mem branch_num !global_reads))
+    then global_reads := List.append !global_reads [branch_num]) in
+  let add_to_writes branch_num = 
+    (if (not (List.mem branch_num !global_writes))
+    then global_writes := List.append !global_writes [branch_num]) in
+  
+  let rec check_branch param branch_num expr' =
+    (match expr' with
+    | Const'(exp) -> Const'(exp)
+    | Var'(var) -> (match var with
+                    | VarBound(name, major, minor) when name = param -> (let dont_care = add_to_reads branch_num in
+                                                                        Var'(var))
+                    | _ -> Var'(var))
+    | Box'(var) -> Box'(var)
+    | BoxGet'(var) -> BoxGet'(var)
+    | BoxSet'(var, exp) -> BoxSet'(var, (check_branch param branch_num exp))
+    | If'(test, dit, dif) -> If'((check_branch param branch_num test), (check_branch param branch_num dit), (check_branch param branch_num dif))
+    | Seq'(exps) -> Seq'(List.map (check_branch param branch_num) exps)
+    | Set'(set_var, set_val) -> (match set_var with
+                                | Var'(VarBound(name, major, minor)) when name = param -> (let dont_care = add_to_writes branch_num in
+                                                                                           Set'(set_var, (check_branch param branch_num set_val)))
+                                | _ -> Set'((check_branch param branch_num set_var), (check_branch param branch_num set_val)))
+    | Def'(def_var, def_val) -> Def'((check_branch param branch_num def_var), (check_branch param branch_num def_val))
+    | Or'(exps) -> Or'(List.map (check_branch param branch_num) exps)
+    | LambdaSimple'(params, body) -> (if (List.mem param params)
+                                      then LambdaSimple'(params, body)
+                                      else LambdaSimple'(params, (check_branch param branch_num body)))
+    | LambdaOpt'(params, opt_param, body) -> (if (List.mem param (List.append params [opt_param]))
+                                              then LambdaOpt'(params, opt_param, body)
+                                              else LambdaOpt'(params, opt_param, (check_branch param branch_num body)))
+    | Applic'(operator, args) -> Applic'((check_branch param branch_num operator), (List.map (check_branch param branch_num) args))
+    | ApplicTP'(operator, args) -> ApplicTP'((check_branch param branch_num operator), (List.map (check_branch param branch_num) args))) in
+
+  let help_func expr =
+    (let next_num = Random.int 9999999 in
+    check_branch param next_num expr) in
+  let rec main_func body = 
+    (match body with
+    | Const'(exp) -> Const'(exp)
+    | Var'(var) -> Var'(var)
+    | Box'(var) -> Box'(var)
+    | BoxGet'(var) -> BoxGet'(var)
+    | BoxSet'(var, exp) -> BoxSet'(var, (help_func exp))
+    | If'(test, dit, dif) -> If'((help_func test), (help_func dit), (help_func dif))
+    | Seq'(exps) -> Seq'(List.map help_func exps)
+    | Set'(set_var, set_val) -> Set'((help_func set_var), (help_func set_val))
+    | Def'(def_var, def_val) -> Def'((help_func def_var), (help_func def_val))
+    | Or'(exps) -> Or'(List.map help_func exps)
+    | LambdaSimple'(params, body) -> boxing (LambdaSimple'(params, body))
+    | LambdaOpt'(params, opt_param, body) -> boxing (LambdaOpt'(params, opt_param, body))
+    | Applic'(operator, args) -> Applic'((help_func operator), (List.map help_func args))
+    | ApplicTP'(operator, args) -> ApplicTP'((help_func operator), (List.map help_func args))) in
+  
+  let ret = main_func body in
+  let r = Printf.printf "\n\n\n\nreads %d\n" (List.length !global_reads) in
+  let r = Printf.printf "writes %d\n\n\n\n\n\n" (List.length !global_writes) in
+  if (is_boxing !global_reads !global_writes)
+  then Const'(Void)
+  else ret;;
+  (*let r = Printf.printf "reads %d\n" (List.length !global_reads) in
+  let r = Printf.printf "writes %d\n\n\n\n\n\n" (List.length !global_writes) in
+  ret;;*) 
+
+
+
 
 let lex e = tail_calls false (lexical_addresses [] [] (tag_parser e))
 
 let lex2 e = lexical_addresses [] [] (tag_parser e)
 
+let lex3 e = boxing (lex e)
 
 module type SEMANTICS = sig
   val run_semantics : expr -> expr'
@@ -139,3 +267,73 @@ let run_semantics expr =
        (annotate_lexical_addresses expr));;
   
 end;; (* struct Semantics *)
+
+
+
+(*let rec rename_params expr =
+  match expr with
+  | LambdaSimple'(params, body) -> LambdaSimple'()
+
+let rec rename_vars env params expr = 
+  match expr with
+  | Var'(var) -> (match var with
+                | VarParam(name, index) -> (if (List.mem name params)
+                                            then VarParam())
+                | VarBound(name, major, minor) -> VarBound((change_name name), major, minor)
+                | _ -> _ )
+  | If'(test, dit, dif) -> If'((rename_vars env params test), (rename_vars env params dit), (rename_vars env params))*)
+
+(*let rec boxing expr = 
+  match expr with
+  | Const'(exp) -> Const'(exp)
+  | Var'(var) -> Var'(var)
+  | Box'(var) -> Box'(var)
+  | BoxGet'(var) -> BoxGet'(var)
+  | BoxSet'(var, exp) -> BoxSet'(var, (boxing exp))
+  | If'(test, dit, dif) -> If'((boxing test), (boxing dit), (boxing dif))
+  | Seq'(exprs) -> Seq'(List.map boxing exprs)
+  | Set'(set_var, set_val) -> Set'((boxing set_var), (boxing set_val))
+  | Def'(def_name, def_value) -> Def'((boxing def_name), (boxing def_value))
+  | Or'(exprs) -> Or'(List.map boxing exprs)
+  | LambdaSimple'(params, body) -> LambdaSimple'(params, (handle_lambda params body));
+
+
+and handle_lambda params expr =*)
+
+
+  (*let rec is_read param expr = 
+    match expr with
+    | Const'(exp) -> false
+    | Var'(var) -> (match var with
+                    | VarParam(name, index) when name = param -> true
+                    | VarBound(name, major, minor) when name = param -> true
+                    | VarFree(name) when name = param -> false
+                    |_ -> false)
+    | Box'(var) -> false
+    | BoxGet'(var) -> false
+    | BoxSet'(var, exp) -> false
+    | If'(test, dit, dif) -> (let test_res = is_read param test in
+                              let dit_res = is_read param dit in
+                              let dif_res = is_read param dif in
+                              (test_res || dit_res || dif_res))
+    | Seq'(exprs) -> (let bools = List.map (fun exp -> is_read param exp) exprs in
+                      List.fold_right check bools false)
+    | Set'(set_var, set_val) -> (match set_var with
+                                 | Var'(VarParam(name, index)) -> (is_read param set_val)
+                                 | Var'(VarBound(name, major, minor)) -> (is_read param set_val)
+                                 | _ ->  check (is_read param set_var) (is_read param set_val))
+    | Def'(def_var, def_val) -> check (is_read param def_var) (is_read param def_val)
+    | Or'(exprs) -> (let bools = List.map (fun exp -> is_read param exp) exprs in
+                      List.fold_right check bools false)
+    | LambdaSimple'(params, body) -> (if (List.mem param params)
+                                      then false
+                                      else (is_read param body))
+    | LambdaOpt'(params, opt_param, body) -> (if (List.mem param (List.append params [opt_param]))
+                                      then false
+                                      else (is_read param body))
+    | Applic'(operator, args) -> (let operator_res = is_read param operator in
+                                 let args_res = List.fold_right check (List.map (fun exp -> is_read param exp) args) false in
+                                 check operator_res args_res)
+    | ApplicTP'(operator, args) -> (let operator_res = is_read param operator in
+                                 let args_res = List.fold_right check (List.map (fun exp -> is_read param exp) args) false in
+                                 check operator_res args_res) *)
