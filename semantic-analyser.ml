@@ -147,30 +147,19 @@ let rec boxing expr =
   | Set'(set_var, set_val) -> Set'((boxing set_var), (boxing set_val))
   | Def'(def_var, def_val) -> Def'((boxing def_var), (boxing def_val))
   | Or'(exps) -> Or'(List.map boxing exps)
-  | LambdaSimple'(params, body) -> LambdaSimple'(params, (boxing (handle_lambda params body)))
-  | LambdaOpt'(params, opt_param, body) -> LambdaOpt'(params, opt_param, (boxing (handle_lambda (List.append params [opt_param]) body)))
+  | LambdaSimple'(params, body) -> LambdaSimple'(params, (boxing (handle_lambda params body 0)))                         
+  | LambdaOpt'(params, opt_param, body) -> LambdaOpt'(params, opt_param, (boxing (handle_lambda (List.append params [opt_param]) body 0)))                                     
   | Applic'(operator, args) -> Applic'((boxing operator), (List.map boxing args))
   | ApplicTP'(operator, args) -> ApplicTP'((boxing operator), (List.map boxing args));
 
 
-
-(*and handle_lambda params body =
- match exprs with
-  | Seq'(exps) -> (let dont_care = (for i = 0 to ((List.length params) - 1) do
-                        (check_box_var (List.nth params i) exps)
-                        done) in
-                    Seq'(exps))
-  | _ -> boxing exprs;*)
-
-and handle_lambda params body = 
+and handle_lambda params body index = 
   match params with
-  | param :: rest -> handle_lambda rest (check_box_var param body)
+  | param :: rest -> handle_lambda rest (check_box_var param body index) (index + 1)
   | [] -> body;
 
 
-
-
-and check_box_var param body =
+and check_box_var param body param_minor =
   let global_reads = ref [] in
   let global_writes = ref [] in
   let add_to_reads branch_num = 
@@ -180,12 +169,17 @@ and check_box_var param body =
     (if (not (List.mem branch_num !global_writes))
     then global_writes := List.append !global_writes [branch_num]) in
   
+  let remove_dont_care dont_care expr = 
+    expr in
+  
   let rec check_branch param branch_num expr' =
     (match expr' with
     | Const'(exp) -> Const'(exp)
     | Var'(var) -> (match var with
                     | VarBound(name, major, minor) when name = param -> (let dont_care = add_to_reads branch_num in
-                                                                        Var'(var))
+                                                                        remove_dont_care dont_care (Var'(var)))
+                    | VarParam(name, index) when name = param -> (let dont_care = add_to_reads branch_num in
+                                                                        remove_dont_care dont_care (Var'(var)))
                     | _ -> Var'(var))
     | Box'(var) -> Box'(var)
     | BoxGet'(var) -> BoxGet'(var)
@@ -194,7 +188,7 @@ and check_box_var param body =
     | Seq'(exps) -> Seq'(List.map (check_branch param branch_num) exps)
     | Set'(set_var, set_val) -> (match set_var with
                                 | Var'(VarBound(name, major, minor)) when name = param -> (let dont_care = add_to_writes branch_num in
-                                                                                           Set'(set_var, (check_branch param branch_num set_val)))
+                                                                                           remove_dont_care dont_care (Set'(set_var, (check_branch param branch_num set_val))))
                                 | _ -> Set'((check_branch param branch_num set_var), (check_branch param branch_num set_val)))
     | Def'(def_var, def_val) -> Def'((check_branch param branch_num def_var), (check_branch param branch_num def_val))
     | Or'(exps) -> Or'(List.map (check_branch param branch_num) exps)
@@ -210,32 +204,66 @@ and check_box_var param body =
   let help_func expr =
     (let next_num = Random.int 9999999 in
     check_branch param next_num expr) in
+  
+  let main_branch = (Random.int 9999999) in
+
+  let rec box_param param body =
+    (match body with
+    | Const'(exp) -> Const'(exp)
+    | Var'(var) -> (match var with
+                    | VarParam(name, _) when name = param -> BoxGet'(var)
+                    | VarBound(name, _, _) when name = param -> BoxGet'(var)
+                    | _ -> Var'(var))
+    | Box'(var) -> Box'(var)
+    | BoxGet'(var) -> BoxGet'(var)
+    | BoxSet'(var, exp) -> BoxSet'(var, (box_param param exp))
+    | If'(test, dit, dif) -> If'((box_param param test), (box_param param dit), (box_param param dif))
+    | Seq'(exps) -> Seq'(List.map (box_param param) exps)
+    | Set'(set_var, set_val) -> (match set_var with
+                                | Var'(VarParam(name, minor)) when name = param -> BoxSet'(VarParam(name, minor), (box_param param set_val))
+                                | Var'(VarBound(name, major, minor)) when name = param -> BoxSet'(VarBound(name, major, minor), (box_param param set_val))
+                                | _ -> Set'((box_param param set_var), (box_param param set_val)))
+    | Def'(def_var, def_val) -> Def'((box_param param def_var), (box_param param def_val))
+    | Or'(exps) -> Or'(List.map (box_param param) exps)
+    | LambdaSimple'(params, body) -> (if (List.mem param params)
+                                     then LambdaSimple'(params, body)
+                                     else LambdaSimple'(params, (box_param param body)))
+    | LambdaOpt'(params, opt_param, body) -> (if (List.mem param (List.append params [opt_param]))
+                                     then LambdaOpt'(params, opt_param, body)
+                                     else LambdaOpt'(params, opt_param, (box_param param body)))
+    | Applic'(operator, args) -> Applic'((box_param param operator), (List.map (box_param param) args))
+    | ApplicTP'(operator, args) -> ApplicTP'((box_param param operator), (List.map (box_param param) args))) in
+  
+  let add_boxing_of_param_at_beggining body = 
+    (match body with
+    | Seq'(exps) -> Seq'(List.append [Set'(Var'(VarParam(param, param_minor)), Box'(VarParam(param, param_minor)))] exps)
+    | _ -> Seq'(List.append [Set'(Var'(VarParam(param, param_minor)), Box'(VarParam(param, param_minor)))] [body])) in
+  
   let rec main_func body = 
     (match body with
     | Const'(exp) -> Const'(exp)
-    | Var'(var) -> Var'(var)
+    | Var'(var) -> check_branch param main_branch (Var'(var))
     | Box'(var) -> Box'(var)
     | BoxGet'(var) -> BoxGet'(var)
-    | BoxSet'(var, exp) -> BoxSet'(var, (help_func exp))
-    | If'(test, dit, dif) -> If'((help_func test), (help_func dit), (help_func dif))
-    | Seq'(exps) -> Seq'(List.map help_func exps)
-    | Set'(set_var, set_val) -> Set'((help_func set_var), (help_func set_val))
-    | Def'(def_var, def_val) -> Def'((help_func def_var), (help_func def_val))
-    | Or'(exps) -> Or'(List.map help_func exps)
-    | LambdaSimple'(params, body) -> boxing (LambdaSimple'(params, body))
-    | LambdaOpt'(params, opt_param, body) -> boxing (LambdaOpt'(params, opt_param, body))
-    | Applic'(operator, args) -> Applic'((help_func operator), (List.map help_func args))
-    | ApplicTP'(operator, args) -> ApplicTP'((help_func operator), (List.map help_func args))) in
+    | BoxSet'(var, exp) -> BoxSet'(var, (main_func exp))
+    | If'(test, dit, dif) -> If'((main_func test), (main_func dit), (main_func dif))
+    | Seq'(exps) -> Seq'(List.map main_func exps)
+    | Set'(set_var, set_val) -> (match set_var with
+                                | Var'(VarParam(name, _)) when name = param -> (let dont_care = add_to_writes main_branch in
+                                                                                remove_dont_care dont_care (Set'((set_var), (main_func set_val))))
+                                | _ -> Set'((main_func set_var), (main_func set_val)))
+    | Def'(def_var, def_val) -> Def'((main_func def_var), (main_func def_val))
+    | Or'(exps) -> Or'(List.map main_func exps)
+    | LambdaSimple'(params, body) -> help_func (LambdaSimple'(params, body))
+    | LambdaOpt'(params, opt_param, body) -> help_func (LambdaOpt'(params, opt_param, body))
+    | Applic'(operator, args) -> Applic'((main_func operator), (List.map main_func args))
+    | ApplicTP'(operator, args) -> ApplicTP'((main_func operator), (List.map main_func args))) in
   
   let ret = main_func body in
-  let r = Printf.printf "\n\n\n\nreads %d\n" (List.length !global_reads) in
-  let r = Printf.printf "writes %d\n\n\n\n\n\n" (List.length !global_writes) in
   if (is_boxing !global_reads !global_writes)
-  then Const'(Void)
+  then (let boxed_lambda = (box_param param ret) in
+        (add_boxing_of_param_at_beggining boxed_lambda))
   else ret;;
-  (*let r = Printf.printf "reads %d\n" (List.length !global_reads) in
-  let r = Printf.printf "writes %d\n\n\n\n\n\n" (List.length !global_writes) in
-  ret;;*) 
 
 
 
